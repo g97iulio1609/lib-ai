@@ -1,4 +1,6 @@
 export { ProviderFactory } from './provider-factory';
+export { ProviderRegistry } from './provider-registry';
+export type { ProviderCreator, ProviderInstance, ProviderModelOptions } from './provider-registry';
 export type {
   ProviderName,
   ModelTier,

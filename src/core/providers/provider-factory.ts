@@ -1,15 +1,10 @@
 import type { LanguageModel } from 'ai';
 import type { ProviderConfig, ProviderName } from './types';
 import { AIProviderFactory, getAIProviderKey } from '@giulio-leone/lib-core';
+import { ProviderRegistry, type ProviderInstance } from './provider-registry';
 
-type ProviderModelOptions = {
-  maxTokens?: number;
-  temperature?: number;
-  reasoningEffort?: ProviderConfig['reasoningEffort'];
-  thinkingConfig?: { thinkingLevel: ProviderConfig['thinkingLevel'] };
-};
-
-type ProviderInstance = (model: string, options?: ProviderModelOptions) => LanguageModel;
+// Side-effect import: registers all built-in providers
+import './register-providers';
 
 /**
  * Provider Factory - Lazy initialization with caching
@@ -54,26 +49,7 @@ export class ProviderFactory {
     apiKey: string,
     preferredProvider?: string | null
   ): ProviderInstance {
-    switch (providerName) {
-      case 'openrouter':
-        return AIProviderFactory.createOpenRouter({
-          apiKey,
-          preferredProvider,
-        }) as unknown as ProviderInstance;
-      case 'openai':
-        return AIProviderFactory.createOpenAI(apiKey) as unknown as ProviderInstance;
-      case 'anthropic':
-        return AIProviderFactory.createAnthropic(apiKey) as unknown as ProviderInstance;
-      case 'google':
-        return AIProviderFactory.createGoogle(apiKey) as unknown as ProviderInstance;
-      case 'xai':
-        return AIProviderFactory.createXAI(apiKey) as unknown as ProviderInstance;
-      case 'minimax':
-        return AIProviderFactory.createMiniMax(apiKey) as unknown as ProviderInstance;
-      // Note: gemini-cli is async-only, handled in getModelAsync()
-      default:
-        throw new Error(`Unknown provider: ${providerName}`);
-    }
+    return ProviderRegistry.create(providerName, apiKey, preferredProvider);
   }
 
   private static getEnvKey(providerName: ProviderName) {
