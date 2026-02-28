@@ -9,10 +9,10 @@
  * - Decomposition strategies
  */
 
-import { prisma } from '@giulio-leone/lib-core';
-import { Prisma } from '@prisma/client';
+import { ServiceRegistry, REPO_TOKENS } from '@giulio-leone/core';
+import type { IAiFrameworkConfigRepository } from '@giulio-leone/core/repositories';
 import { toPrismaJsonValue } from '@giulio-leone/lib-shared';
-import type { ai_framework_configs, ai_framework_config_history } from '@prisma/client';
+import type { AiFrameworkConfig, AiFrameworkConfigHistory } from '@giulio-leone/core/repositories';
 import {
   FrameworkFeature,
   type ConsensusConfig,
@@ -192,6 +192,10 @@ const FEATURE_DESCRIPTIONS: Record<FrameworkFeature, string> = {
  * AI Framework Config Service
  */
 export class AIFrameworkConfigService {
+  private static getRepo(): IAiFrameworkConfigRepository {
+    return ServiceRegistry.getInstance().resolve<IAiFrameworkConfigRepository>(REPO_TOKENS.AI_FRAMEWORK_CONFIG);
+  }
+
   /**
    * Get configuration for a specific feature
    */
@@ -203,9 +207,7 @@ export class AIFrameworkConfigService {
   }> {
     const normalizedFeature = normalizeFeature(feature);
 
-    let record = await prisma.ai_framework_configs.findUnique({
-      where: { feature: normalizedFeature },
-    });
+    let record = await this.getRepo().findByFeature(normalizedFeature);
 
     if (!record) {
       // Return default configuration if not found
@@ -226,10 +228,8 @@ export class AIFrameworkConfigService {
   /**
    * Get all feature configurations
    */
-  static async getAllConfigs(): Promise<ai_framework_configs[]> {
-    return await prisma.ai_framework_configs.findMany({
-      orderBy: { feature: 'asc' },
-    });
+  static async getAllConfigs(): Promise<AiFrameworkConfig[]> {
+    return await this.getRepo().findAll();
   }
 
   /**
@@ -241,7 +241,7 @@ export class AIFrameworkConfigService {
     config?: Partial<FeatureConfigMap[F]>;
     updatedBy: string;
     changeReason?: string;
-  }): Promise<ai_framework_configs> {
+  }): Promise<AiFrameworkConfig> {
     const { feature, isEnabled, config, updatedBy, changeReason } = params;
     const normalizedFeature = normalizeFeature(feature);
 
@@ -269,28 +269,28 @@ export class AIFrameworkConfigService {
     }
 
     // Upsert configuration
-    const updated = await prisma.ai_framework_configs.upsert({
-      where: { feature: normalizedFeature },
-      create: {
+    const updated = await this.getRepo().upsert(
+      normalizedFeature,
+      {
         feature: normalizedFeature,
         isEnabled: isEnabled ?? false,
         config: toPrismaJsonValue(mergedConfig),
         description: FEATURE_DESCRIPTIONS[normalizedFeature],
         updatedBy,
       },
-      update: {
+      {
         isEnabled: isEnabled ?? current.isEnabled,
         config: toPrismaJsonValue(mergedConfig),
         updatedBy,
         updatedAt: new Date(),
-      },
-    });
+      }
+    );
 
     // Create history record
     await this.createHistory({
       feature: normalizedFeature,
       isEnabled: updated.isEnabled,
-      config: updated.config as Prisma.JsonObject,
+      config: updated.config as Record<string, unknown>,
       changedBy: updatedBy,
       changeReason,
     });
@@ -313,7 +313,7 @@ export class AIFrameworkConfigService {
     feature: FrameworkFeature,
     updatedBy: string,
     changeReason?: string
-  ): Promise<ai_framework_configs> {
+  ): Promise<AiFrameworkConfig> {
     return await this.updateConfig({
       feature,
       isEnabled: true,
@@ -329,7 +329,7 @@ export class AIFrameworkConfigService {
     feature: FrameworkFeature,
     updatedBy: string,
     changeReason?: string
-  ): Promise<ai_framework_configs> {
+  ): Promise<AiFrameworkConfig> {
     return await this.updateConfig({
       feature,
       isEnabled: false,
@@ -349,19 +349,15 @@ export class AIFrameworkConfigService {
       if (handled.has(normalizedFeature)) continue;
       handled.add(normalizedFeature);
 
-      const existing = await prisma.ai_framework_configs.findUnique({
-        where: { feature: normalizedFeature },
-      });
+      const existing = await this.getRepo().findByFeature(normalizedFeature);
 
       if (!existing) {
-        await prisma.ai_framework_configs.create({
-          data: {
-            feature: normalizedFeature,
-            isEnabled: false, // All features disabled by default
-            config: toPrismaJsonValue(DEFAULT_CONFIGS[normalizedFeature]),
-            description: FEATURE_DESCRIPTIONS[normalizedFeature],
-            updatedBy,
-          },
+        await this.getRepo().create({
+          feature: normalizedFeature,
+          isEnabled: false,
+          config: toPrismaJsonValue(DEFAULT_CONFIGS[normalizedFeature]),
+          description: FEATURE_DESCRIPTIONS[normalizedFeature],
+          updatedBy,
         });
       }
     }
@@ -373,25 +369,19 @@ export class AIFrameworkConfigService {
   private static async createHistory(params: {
     feature: string;
     isEnabled: boolean;
-    config: Prisma.JsonObject;
+    config: Record<string, unknown>;
     changedBy: string;
     changeReason?: string;
-  }): Promise<ai_framework_config_history> {
-    return await prisma.ai_framework_config_history.create({
-      data: params,
-    });
+  }): Promise<AiFrameworkConfigHistory> {
+    return await this.getRepo().createHistoryEntry(params);
   }
 
   /**
    * Get configuration history for a feature
    */
-  static async getHistory(feature: FrameworkFeature): Promise<ai_framework_config_history[]> {
+  static async getHistory(feature: FrameworkFeature): Promise<AiFrameworkConfigHistory[]> {
     const normalizedFeature = normalizeFeature(feature);
-    return await prisma.ai_framework_config_history.findMany({
-      where: { feature: normalizedFeature },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    });
+    return await this.getRepo().findHistory(normalizedFeature);
   }
 
   /**

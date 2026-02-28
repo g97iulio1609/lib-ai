@@ -5,8 +5,8 @@
  * Crea, revoca e salva subkey nel database
  */
 
-import { prisma } from '@giulio-leone/lib-core';
-import type { Prisma } from '@prisma/client';
+import { ServiceRegistry, REPO_TOKENS } from '@giulio-leone/core';
+import type { IUserApiKeyRepository } from '@giulio-leone/core/repositories';
 import { logger } from '@giulio-leone/lib-core';
 import { createId } from '@giulio-leone/lib-shared/id-generator';
 
@@ -41,6 +41,10 @@ export interface SaveSubkeyParams {
  * OpenRouter Subkey Service
  */
 export class OpenRouterSubkeyService {
+  private static getRepo(): IUserApiKeyRepository {
+    return ServiceRegistry.getInstance().resolve<IUserApiKeyRepository>(REPO_TOKENS.USER_API_KEY);
+  }
+
   /**
    * Crea una subkey OpenRouter per l'utente
    * @param params Parametri per la creazione della subkey
@@ -106,11 +110,8 @@ export class OpenRouterSubkeyService {
     }
 
     // Recupera la subkey dal database per ottenere l'ID
-    const apiKeyRecord = await prisma.user_api_keys.findFirst({
-      where: {
-        keyLabel,
-        status: 'ACTIVE',
-      },
+    const apiKeyRecord = await this.getRepo().findFirstActive({
+      keyLabel,
     });
 
     if (!apiKeyRecord) {
@@ -138,40 +139,40 @@ export class OpenRouterSubkeyService {
 
     // Aggiorna lo status nel database se esiste
     if (apiKeyRecord) {
-      await prisma.user_api_keys.update({
-        where: { id: apiKeyRecord.id },
-        data: { status: 'REVOKED', updatedAt: new Date() },
-      });
+      await this.getRepo().update(apiKeyRecord.id, { status: 'REVOKED', updatedAt: new Date() });
     }
   }
 
   /**
    * Salva una subkey nel database
    * @param params Parametri per il salvataggio
-   * @param tx Client Prisma opzionale per transazioni
+   * @param tx Optional duck-typed client for transactions (must have user_api_keys.create)
    * @returns Record della subkey salvata
    */
   static async saveSubkeyToDb(
     params: SaveSubkeyParams,
-    tx?: Prisma.TransactionClient | typeof prisma
+    tx?: { user_api_keys: { create: (args: Record<string, unknown>) => Promise<unknown> } }
   ): Promise<void> {
     const { userId, provider, keyLabel, keyHash, limit, stripePaymentIntentId } = params;
-    const client = tx ?? prisma;
 
-    await client.user_api_keys.create({
-      data: {
-        id: createId(),
-        userId,
-        provider,
-        keyLabel,
-        keyHash,
-        limit,
-        status: 'ACTIVE',
-        stripePaymentIntentId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    });
+    const data = {
+      id: createId(),
+      userId,
+      provider,
+      keyLabel,
+      keyHash,
+      limit,
+      status: 'ACTIVE',
+      stripePaymentIntentId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    if (tx) {
+      await tx.user_api_keys.create({ data });
+    } else {
+      await this.getRepo().create(data);
+    }
   }
 
   /**
@@ -180,11 +181,8 @@ export class OpenRouterSubkeyService {
    * @returns true se esiste, false altrimenti
    */
   static async hasSubkeyForPaymentIntent(stripePaymentIntentId: string): Promise<boolean> {
-    const existing = await prisma.user_api_keys.findFirst({
-      where: {
-        stripePaymentIntentId,
-        status: 'ACTIVE',
-      },
+    const existing = await this.getRepo().findFirstActive({
+      stripePaymentIntentId,
     });
 
     return !!existing;

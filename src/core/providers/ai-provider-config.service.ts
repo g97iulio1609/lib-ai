@@ -6,8 +6,8 @@
  * Database contiene solo metadata (isEnabled, defaultModel, etc.)
  */
 
-import { prisma } from '@giulio-leone/lib-core';
-import { AIProvider, type Prisma } from '@prisma/client';
+import { ServiceRegistry, REPO_TOKENS } from '@giulio-leone/core';
+import type { IAiProviderConfigRepository } from '@giulio-leone/core/repositories';
 import type { ProviderName } from './types';
 import {
   createEnvVar,
@@ -20,45 +20,62 @@ type VercelEnvironment = 'production' | 'preview' | 'development';
 import { logError } from '@giulio-leone/lib-shared';
 import { logger } from '@giulio-leone/lib-shared';
 
+/** String constants matching the AIProvider Prisma enum */
+const AI_PROVIDER = {
+  GOOGLE: 'GOOGLE',
+  ANTHROPIC: 'ANTHROPIC',
+  OPENAI: 'OPENAI',
+  XAI: 'XAI',
+  OPENROUTER: 'OPENROUTER',
+  MINIMAX: 'MINIMAX',
+  GEMINI_CLI: 'GEMINI_CLI',
+} as const;
+type AIProviderValue = (typeof AI_PROVIDER)[keyof typeof AI_PROVIDER];
+
+/** JSON value types (replaces Prisma.JsonValue / JsonObject / JsonArray) */
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue };
+type JsonArray = JsonValue[];
+
 interface ProviderMapEntry {
-  enum: AIProvider;
+  enum: AIProviderValue;
   env: string;
   label: string;
 }
 
 export const PROVIDER_MAP: Record<ProviderName, ProviderMapEntry> = {
   google: {
-    enum: AIProvider.GOOGLE,
+    enum: AI_PROVIDER.GOOGLE,
     env: 'GOOGLE_GENERATIVE_AI_API_KEY',
     label: 'Google AI Studio',
   },
   anthropic: {
-    enum: AIProvider.ANTHROPIC,
+    enum: AI_PROVIDER.ANTHROPIC,
     env: 'ANTHROPIC_API_KEY',
     label: 'Anthropic Claude',
   },
   openai: {
-    enum: AIProvider.OPENAI,
+    enum: AI_PROVIDER.OPENAI,
     env: 'OPENAI_API_KEY',
     label: 'OpenAI',
   },
   xai: {
-    enum: AIProvider.XAI,
+    enum: AI_PROVIDER.XAI,
     env: 'XAI_API_KEY',
     label: 'xAI Grok',
   },
   openrouter: {
-    enum: AIProvider.OPENROUTER,
+    enum: AI_PROVIDER.OPENROUTER,
     env: 'OPENROUTER_API_KEY',
     label: 'OpenRouter',
   },
   minimax: {
-    enum: AIProvider.MINIMAX,
+    enum: AI_PROVIDER.MINIMAX,
     env: 'MINIMAX_API_KEY',
     label: 'MiniMax',
   },
   'gemini-cli': {
-    enum: AIProvider.GEMINI_CLI,
+    enum: AI_PROVIDER.GEMINI_CLI,
     env: 'GEMINI_CLI_AUTH', // OAuth uses ~/.gemini/oauth_creds.json, env var optional
     label: 'Gemini CLI (OAuth)',
   },
@@ -88,6 +105,10 @@ export interface ProviderConfigDTO {
 }
 
 export class AIProviderConfigService {
+  private static getRepo(): IAiProviderConfigRepository {
+    return ServiceRegistry.getInstance().resolve<IAiProviderConfigRepository>(REPO_TOKENS.AI_PROVIDER_CONFIG);
+  }
+
   private static normalizeEnvValue(value?: string | null): string | null {
     if (!value) {
       return null;
@@ -130,9 +151,7 @@ export class AIProviderConfigService {
    * Restituisce la configurazione per un provider
    */
   static async getConfig(provider: ProviderName) {
-    return prisma.ai_provider_configs.findUnique({
-      where: { provider: PROVIDER_MAP[provider].enum },
-    });
+    return this.getRepo().findByProvider(PROVIDER_MAP[provider].enum);
   }
 
   /**
@@ -140,21 +159,11 @@ export class AIProviderConfigService {
    * Verifica se API key esiste su Vercel per determinare hasKey
    */
   static async listConfigs(): Promise<ProviderConfigDTO[]> {
-    const configs = await prisma.ai_provider_configs.findMany({
-      select: {
-        provider: true,
-        isEnabled: true,
-        defaultModel: true,
-        metadata: true,
-        updatedAt: true,
-        updatedBy: true,
-      },
-      orderBy: { provider: 'asc' },
-    });
+    const configs = await this.getRepo().listAll();
 
     const configMap = new Map<ProviderName, (typeof configs)[number]>();
     for (const config of configs) {
-      const providerName = this.enumToProviderName(config.provider as AIProvider);
+      const providerName = this.enumToProviderName(config.provider as AIProviderValue);
       configMap.set(providerName, config);
     }
 
@@ -266,9 +275,7 @@ export class AIProviderConfigService {
   static async upsertConfig(params: UpsertProviderConfigParams): Promise<ProviderConfigDTO> {
     const mapping = PROVIDER_MAP[params.provider];
 
-    const existing = await prisma.ai_provider_configs.findUnique({
-      where: { provider: mapping.enum },
-    });
+    const existing = await this.getRepo().findByProvider(mapping.enum);
 
     // Prepara e aggiorna metadata
     const existingMetadata =
@@ -289,7 +296,7 @@ export class AIProviderConfigService {
 
     // buildMetadata preserva tutti i campi esistenti e gestisce solo history
     const metadataToSave = this.buildMetadata(
-      Object.keys(existingMetadata).length > 0 ? (existingMetadata as Prisma.JsonObject) : null,
+      Object.keys(existingMetadata).length > 0 ? (existingMetadata as JsonObject) : null,
       {
         changeReason: params.changeReason,
         updatedBy: params.updatedBy,
@@ -316,21 +323,10 @@ export class AIProviderConfigService {
     }
 
     // Aggiorna solo metadata nel DB (NON apiKey)
-    const updated = await prisma.ai_provider_configs.upsert({
-      where: { provider: mapping.enum },
-      update: {
-        // NON aggiornare apiKey - è su Vercel
-        ...(params.isEnabled !== undefined ? { isEnabled: params.isEnabled } : {}),
-        ...(params.defaultModel !== undefined
-          ? { defaultModel: params.defaultModel?.trim() || null }
-          : {}),
-        ...(metadataToSave !== undefined ? { metadata: metadataToSave } : {}),
-        ...(vercelEnvVarId ? { vercelEnvVarId } : {}),
-        updatedBy: params.updatedBy,
-      },
-      create: {
+    const updated = await this.getRepo().upsert(
+      mapping.enum,
+      {
         provider: mapping.enum,
-        // NON salvare apiKey - è su Vercel
         isEnabled: params.isEnabled ?? true,
         defaultModel: params.defaultModel?.trim() || null,
         ...(metadataToSave !== undefined ? { metadata: metadataToSave } : {}),
@@ -338,7 +334,16 @@ export class AIProviderConfigService {
         updatedBy: params.updatedBy,
         updatedAt: new Date(),
       },
-    });
+      {
+        ...(params.isEnabled !== undefined ? { isEnabled: params.isEnabled } : {}),
+        ...(params.defaultModel !== undefined
+          ? { defaultModel: params.defaultModel?.trim() || null }
+          : {}),
+        ...(metadataToSave !== undefined ? { metadata: metadataToSave } : {}),
+        ...(vercelEnvVarId ? { vercelEnvVarId } : {}),
+        updatedBy: params.updatedBy,
+      }
+    );
 
     const sanitizedValue = this.normalizeEnvValue(process.env[mapping.env]);
     const hasKeyInEnv = Boolean(sanitizedValue);
@@ -354,7 +359,7 @@ export class AIProviderConfigService {
     }
 
     return this.toDTO(
-      updated.provider as AIProvider,
+      updated.provider as AIProviderValue,
       {
         isEnabled: updated.isEnabled,
         apiKey: hasKeyOnVercel ? '***' : null, // Placeholder - non leggiamo la chiave
@@ -397,19 +402,7 @@ export class AIProviderConfigService {
 
   static async getDefaultModel(provider: ProviderName): Promise<string | null> {
     // Single Source of Truth: ai_chat_models (Admin Dashboard > Models)
-    // We look for the globally active default model
-    const defaultModel = await prisma.ai_chat_models.findFirst({
-      where: {
-        isDefault: true,
-        isActive: true,
-        // Ensure we only return a model if it matches the requested provider
-        provider: PROVIDER_MAP[provider].enum,
-      },
-      select: {
-        modelId: true,
-      },
-    });
-
+    const defaultModel = await this.getRepo().findDefaultChatModel(PROVIDER_MAP[provider].enum);
     return defaultModel?.modelId ?? null;
   }
 
@@ -422,24 +415,14 @@ export class AIProviderConfigService {
     provider: ProviderName;
   } | null> {
     // Single Source of Truth: ai_chat_models (Admin Dashboard > Models)
-    // Get the globally active default model regardless of provider
-    const defaultModel = await prisma.ai_chat_models.findFirst({
-      where: {
-        isDefault: true,
-        isActive: true,
-      },
-      select: {
-        modelId: true,
-        provider: true,
-      },
-    });
+    const defaultModel = await this.getRepo().findGlobalDefaultChatModel();
 
     if (!defaultModel) {
       return null;
     }
 
     // Convert AIProvider enum to ProviderName
-    const providerName = this.enumToProviderName(defaultModel.provider as AIProvider);
+    const providerName = this.enumToProviderName(defaultModel.provider as AIProviderValue);
 
     return {
       modelId: defaultModel.modelId,
@@ -450,7 +433,7 @@ export class AIProviderConfigService {
   /**
    * Estrae defaultProvider dal metadata
    */
-  private static extractDefaultProvider(metadata: Prisma.JsonValue | null): string | null {
+  private static extractDefaultProvider(metadata: JsonValue | null): string | null {
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
       return null;
     }
@@ -469,21 +452,19 @@ export class AIProviderConfigService {
       return null;
     }
 
-    const config = await prisma.ai_provider_configs.findUnique({
-      where: { provider: PROVIDER_MAP[provider].enum },
-      select: {
-        metadata: true,
-      },
-    });
+    const config = await this.getRepo().findByProviderSelect(
+      PROVIDER_MAP[provider].enum,
+      { metadata: true }
+    );
 
-    return this.extractDefaultProvider(config?.metadata ?? null);
+    return this.extractDefaultProvider((config?.metadata ?? null) as JsonValue | null);
   }
 
   /**
    * Conversione a DTO (senza rivelare la chiave)
    */
   static toDTO(
-    provider: AIProvider,
+    provider: AIProviderValue,
     data: {
       isEnabled: boolean;
       apiKey: string | null;
@@ -496,7 +477,7 @@ export class AIProviderConfigService {
     const providerName = this.enumToProviderName(provider);
     const defaultProvider =
       providerName === 'openrouter'
-        ? this.extractDefaultProvider(data.metadata as Prisma.JsonValue | null)
+        ? this.extractDefaultProvider(data.metadata as JsonValue | null)
         : null;
 
     // hasKey è true se apiKey è presente (anche se è placeholder '***')
@@ -516,7 +497,7 @@ export class AIProviderConfigService {
     };
   }
 
-  static enumToProviderName(provider: AIProvider): ProviderName {
+  static enumToProviderName(provider: AIProviderValue): ProviderName {
     const entry = Object.entries(PROVIDER_MAP).find(([, value]) => value.enum === provider);
     if (!entry) {
       throw new Error(`Provider non gestito: ${provider}`);
@@ -525,12 +506,12 @@ export class AIProviderConfigService {
   }
 
   static buildMetadata(
-    current: Prisma.JsonValue | null,
+    current: JsonValue | null,
     params: { changeReason?: string; updatedBy?: string }
-  ): Prisma.JsonObject | undefined {
+  ): JsonObject | undefined {
     if (!params.changeReason) {
       return current && typeof current === 'object' && !Array.isArray(current)
-        ? (current as Prisma.JsonObject)
+        ? (current as JsonObject)
         : undefined;
     }
 
@@ -540,19 +521,19 @@ export class AIProviderConfigService {
       updatedAt: new Date().toISOString(),
     };
 
-    const currentObject: Prisma.JsonObject =
+    const currentObject: JsonObject =
       current && typeof current === 'object' && !Array.isArray(current)
-        ? (current as Prisma.JsonObject)
+        ? (current as JsonObject)
         : {};
 
     const historyValue = currentObject.history;
-    const existingHistory: Prisma.JsonArray = Array.isArray(historyValue)
-      ? (historyValue as Prisma.JsonArray)
+    const existingHistory: JsonArray = Array.isArray(historyValue)
+      ? (historyValue as JsonArray)
       : [];
-    const updatedHistory = [historyEntry as Prisma.JsonValue, ...existingHistory].slice(
+    const updatedHistory = [historyEntry as JsonValue, ...existingHistory].slice(
       0,
       20
-    ) as Prisma.JsonArray;
+    ) as JsonArray;
 
     return {
       ...currentObject,
