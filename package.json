@@ -58,15 +58,15 @@
     "build": "tsup"
   },
   "dependencies": {
-    "@giulio-leone/constants": "^0.13.0",
-    "@giulio-leone/lib-config": "^0.1.1",
-    "@giulio-leone/lib-vercel-admin": "^0.9.0",
     "@giulio-leone/agent-contracts": "workspace:*",
+    "@giulio-leone/constants": "^0.13.0",
     "@giulio-leone/core": "workspace:*",
+    "@giulio-leone/lib-config": "^0.1.1",
     "@giulio-leone/lib-core": "workspace:*",
     "@giulio-leone/lib-shared": "workspace:*",
+    "@giulio-leone/lib-vercel-admin": "^0.9.0",
     "@giulio-leone/schemas": "workspace:*",
-    "@prisma/client": "^7.2.0"
+    "@prisma/client": "^7.4.2"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
